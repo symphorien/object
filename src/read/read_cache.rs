@@ -27,7 +27,32 @@ struct ReadCacheInternal<R: Read + Seek> {
     read: R,
     bufs: HashMap<(u64, u64), Box<[u8]>>,
     strings: HashMap<(u64, u8), Box<[u8]>>,
+    len: Option<u64>,
 }
+
+impl<R: Read + Seek> ReadCacheInternal<R> {
+    /// Ensures this range is contained in the len of the file
+    fn range_in_bounds(&mut self, range: &Range<u64>) -> Result<(), ()> {
+        if range.start <= range.end && range.end <= self.len()? {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    /// The length of the underlying read, memoized
+    fn len(&mut self) -> Result<u64, ()> {
+        match self.len {
+            Some(len) => Ok(len),
+            None => {
+                let len = self.read.seek(SeekFrom::End(0)).map_err(|_| ())?;
+                self.len = Some(len);
+                Ok(len)
+            }
+        }
+    }
+}
+
 
 impl<R: Read + Seek> ReadCache<R> {
     /// Create an empty `ReadCache` for the given stream.
@@ -37,6 +62,7 @@ impl<R: Read + Seek> ReadCache<R> {
                 read,
                 bufs: HashMap::new(),
                 strings: HashMap::new(),
+                len: None,
             }),
         }
     }
@@ -64,8 +90,7 @@ impl<R: Read + Seek> ReadCache<R> {
 
 impl<'a, R: Read + Seek> ReadRef<'a> for &'a ReadCache<R> {
     fn len(self) -> Result<u64, ()> {
-        let cache = &mut *self.cache.borrow_mut();
-        cache.read.seek(SeekFrom::End(0)).map_err(|_| ())
+        self.cache.borrow_mut().len()
     }
 
     fn read_bytes_at(self, offset: u64, size: u64) -> Result<&'a [u8], ()> {
@@ -73,6 +98,7 @@ impl<'a, R: Read + Seek> ReadRef<'a> for &'a ReadCache<R> {
             return Ok(&[]);
         }
         let cache = &mut *self.cache.borrow_mut();
+        cache.range_in_bounds(&(offset..(offset.saturating_add(size))))?;
         let buf = match cache.bufs.entry((offset, size)) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
@@ -90,6 +116,7 @@ impl<'a, R: Read + Seek> ReadRef<'a> for &'a ReadCache<R> {
 
     fn read_bytes_at_until(self, range: Range<u64>, delimiter: u8) -> Result<&'a [u8], ()> {
         let cache = &mut *self.cache.borrow_mut();
+        cache.range_in_bounds(&range)?;
         let buf = match cache.strings.entry((range.start, delimiter)) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
